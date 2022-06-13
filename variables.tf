@@ -48,6 +48,12 @@ variable "use_spot_instance" {
   default     = true
 }
 
+variable "associate_public_ip_address" {
+  description = "Whether to associate a public ip address"
+  type        = bool
+  default     = true
+}
+
 variable "key_name" {
   description = "Name of the key pair for the NAT instance. You can set this to assign the key pair to the NAT instance"
   type        = string
