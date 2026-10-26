@@ -19,9 +19,15 @@ sysctl -q -w net.ipv4.conf.eth1.send_redirects=0
 
 # Egress interface. eth0 carries the instance's auto-assigned public IP, which changes every time the
 # instance is replaced (spot interruption, ASG refresh). When the persistent ENI eth1 has a public IP,
-# i.e. an Elastic IP is associated with it, route the default and masquerade through eth1 instead, so
-# NAT traffic (and the instance's own) leaves from that stable address. eth0 keeps its public IP only
-# to boot and attach eth1.
+# i.e. an Elastic IP is associated with it, NAT traffic is routed and masqueraded through eth1 instead,
+# so it leaves from that stable address. eth0 keeps its public IP to boot, attach eth1 and carry the
+# instance's own traffic.
+#
+# Forwarded traffic enters on eth1 (the private route tables target this ENI), so a policy rule sends
+# whatever arrives there through its own table, whose default route is eth1. The main table is left
+# alone: rewriting its default route does not stick, as the network scripts configuring eth1 after this
+# runs restore the eth0 default. Replies to NATed connections also arrive on eth1 and follow the same
+# rule back to the private subnets.
 #
 # With several Elastic IPs on eth1 (one per private IP), MASQUERADE uses eth1's primary private IP, so
 # traffic leaves from the Elastic IP of that address. egress_public_ip picks another one: traffic is
@@ -41,11 +47,13 @@ if [ "${egress_via_eip}" = "true" ]; then
   done
 
   if [ -n "$eth1_public_ips" ]; then
-    # eth1 is in the same subnet as eth0, so the subnet router is the same gateway. Set the route
-    # explicitly: Amazon Linux 2 adds no main-table default route for a secondary ENI, which is why
-    # the original `ip route del default dev eth0` left the instance without one.
+    # eth1 is in the same subnet as eth0, so the subnet router is the same gateway
     gateway=$(ip route show default dev eth0 | awk '{print $3; exit}')
-    ip route replace default via "$gateway" dev eth1
+    nat_route_table=200
+    ip route replace default via "$gateway" dev eth1 table "$nat_route_table"
+    # Re-running (systemctl restart snat) must not stack duplicate rules
+    while ip rule del iif eth1 lookup "$nat_route_table" 2>/dev/null; do :; done
+    ip rule add iif eth1 lookup "$nat_route_table" priority 1000
     egress_dev=eth1
     echo "eth1 public IPs: $(echo $eth1_public_ips)"
 
@@ -79,8 +87,8 @@ if [ -n "$snat_to_private_ip" ]; then
 else
   iptables -t nat -A POSTROUTING -o "$egress_dev" -j MASQUERADE
 fi
-# Should a DHCP renewal on eth0 restore its default route, traffic falls back to eth0's address
-# instead of leaving un-translated
+# Anything forwarded out of eth0 all the same (e.g. the eth1 rule removed by hand) still gets
+# translated, to eth0's address, instead of leaving with a private source
 if [ "$egress_dev" != eth0 ]; then
   iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
 fi
