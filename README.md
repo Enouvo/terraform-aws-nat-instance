@@ -80,7 +80,16 @@ The instance will execute [`runonce.sh`](runonce.sh) and [`snat.sh`](snat.sh) to
 
 1. Attach the ENI to `eth1`.
 1. Set the kernel parameters for IP forwarding and masquerade.
-1. Switch the default route to `eth1`.
+1. If `eth1` has a public IP (your Elastic IP) and `egress_via_eip` is on (the default), switch the
+   default route to `eth1` and masquerade there, so traffic leaves from the Elastic IP. Otherwise it
+   masquerades through `eth0`, whose auto-assigned public IP changes whenever the instance is replaced.
+
+Allowlisting the Elastic IP on an external service therefore requires `egress_via_eip`. The ENI's
+public IPs and the chosen one are logged by `snat.sh` in the instance's cloud-init output.
+
+With several Elastic IPs on the ENI (one per private IP), traffic leaves from the one on the ENI's
+primary private IP. Set `egress_public_ip` to pick another: traffic is then SNATed to the private IP
+that Elastic IP is associated with. An address not associated with the ENI is logged and ignored.
 
 
 ## Configuration
@@ -165,6 +174,8 @@ No requirements.
 
 | Name | Description | Type | Default | Required |
 |------|-------------|------|---------|:--------:|
+| egress\_public\_ip | With egress\_via\_eip and several Elastic IPs on the ENI, the one to send traffic from. It must be associated with one of the ENI's private IPs. Empty: the Elastic IP of the ENI's primary private IP | `string` | `""` | no |
+| egress\_via\_eip | Send NAT traffic out through the ENI (eth1) when it has a public IP, i.e. an Elastic IP is associated with it, so it leaves from that stable address instead of the instance's auto-assigned public IP. Without a public IP on the ENI, traffic keeps leaving through eth0 | `bool` | `true` | no |
 | enabled | Enable or not costly resources | `bool` | `true` | no |
 | image\_id | AMI of the NAT instance. Default to the latest Amazon Linux 2 | `string` | `""` | no |
 | instance\_types | Candidates of spot instance type for the NAT instance. This is used in the mixed instances policy | `list` | <pre>[<br>  "t3.nano",<br>  "t3a.nano"<br>]</pre> | no |

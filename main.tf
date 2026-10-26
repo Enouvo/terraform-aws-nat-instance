@@ -96,7 +96,10 @@ resource "aws_launch_template" "this" {
         },
         {
           path : "/opt/nat/snat.sh",
-          content : file("${path.module}/snat.sh"),
+          content : templatefile("${path.module}/snat.sh", {
+            egress_via_eip   = var.egress_via_eip
+            egress_public_ip = var.egress_public_ip
+          }),
           permissions : "0755",
         },
         {
