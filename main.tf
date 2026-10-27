@@ -148,6 +148,11 @@ resource "aws_autoscaling_group" "this" {
   max_size            = 1
   vpc_zone_identifier = [var.public_subnet]
 
+  # With the ENI attached by the lifecycle hook, a new instance only gets InService once the ENI is free. When this ASG
+  # is replaced (create_before_destroy), the old instance holding it is terminated only after the new ASG is created,
+  # so waiting for the new one's capacity here would deadlock until the timeout.
+  wait_for_capacity_timeout = local.attach_eni_externally ? "0" : null
+
   mixed_instances_policy {
     instances_distribution {
       on_demand_base_capacity                  = var.use_spot_instance ? 0 : 1
@@ -167,14 +172,15 @@ resource "aws_autoscaling_group" "this" {
     }
   }
 
-  # Present from the first launch on (lifecycle-hook.tf)
+  # Present from the first launch of a new ASG on (lifecycle-hook.tf). Changes are ignored (lifecycle below): on an
+  # existing ASG they would replace it, so aws_autoscaling_lifecycle_hook.attach_eni adds the hook there instead.
   dynamic "initial_lifecycle_hook" {
     for_each = local.attach_eni_externally ? [1] : []
     content {
       name                 = local.lifecycle_hook_name
       lifecycle_transition = "autoscaling:EC2_INSTANCE_LAUNCHING"
       default_result       = "ABANDON"
-      heartbeat_timeout    = 600
+      heartbeat_timeout    = local.lifecycle_hook_timeout
     }
   }
 
@@ -189,6 +195,7 @@ resource "aws_autoscaling_group" "this" {
 
   lifecycle {
     create_before_destroy = true
+    ignore_changes        = [initial_lifecycle_hook]
 
     precondition {
       condition     = !var.associate_public_ip_address ? var.egress_via_eip : true

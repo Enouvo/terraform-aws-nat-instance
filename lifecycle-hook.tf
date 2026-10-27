@@ -11,7 +11,9 @@
 locals {
   attach_eni_externally = var.enabled && (var.attach_eni_from_lifecycle_hook || !var.associate_public_ip_address)
   lifecycle_hook_name   = "attach-eni"
-  lifecycle_hook_count  = local.attach_eni_externally ? 1 : 0
+  # Covers the runbook's waits (instance running, ENI released by the instance being replaced) and the attach
+  lifecycle_hook_timeout = 900
+  lifecycle_hook_count   = local.attach_eni_externally ? 1 : 0
 }
 
 data "aws_caller_identity" "current" {}
@@ -52,10 +54,11 @@ resource "aws_ssm_document" "attach_eni" {
         }
       },
       {
-        # The instance being replaced may still hold it
+        # The instance being replaced may still hold it: with a replaced ASG, its old instance is terminated only
+        # after the new ASG exists, which can take a few minutes (within the hook's heartbeat timeout)
         name           = "waitForEniAvailable"
         action         = "aws:waitForAwsResourceProperty"
-        timeoutSeconds = 240
+        timeoutSeconds = 480
         onFailure      = "step:abandon"
         inputs = {
           Service             = "ec2"
@@ -234,9 +237,13 @@ resource "aws_iam_role_policy" "attach_eni_events" {
     Version = "2012-10-17"
     Statement = [
       {
-        Effect   = "Allow"
-        Action   = "ssm:StartAutomationExecution"
-        Resource = "${replace(aws_ssm_document.attach_eni[0].arn, ":document/", ":automation-definition/")}:*"
+        # Authorized against the document ARN, not only the automation-definition ARN EventBridge targets
+        Effect = "Allow"
+        Action = "ssm:StartAutomationExecution"
+        Resource = [
+          aws_ssm_document.attach_eni[0].arn,
+          "${replace(aws_ssm_document.attach_eni[0].arn, ":document/", ":automation-definition/")}:*",
+        ]
       },
       {
         Effect   = "Allow"
@@ -247,7 +254,8 @@ resource "aws_iam_role_policy" "attach_eni_events" {
   })
 }
 
-# For an ASG that already exists when this is turned on (initial_lifecycle_hook only applies at creation)
+# Adds the hook to an ASG that already exists when this is turned on: the ASG's initial_lifecycle_hook only applies at
+# creation, and changes to it are ignored there (they would otherwise replace the ASG)
 resource "aws_autoscaling_lifecycle_hook" "attach_eni" {
   count = local.lifecycle_hook_count
 
@@ -255,5 +263,5 @@ resource "aws_autoscaling_lifecycle_hook" "attach_eni" {
   autoscaling_group_name = aws_autoscaling_group.this.name
   lifecycle_transition   = "autoscaling:EC2_INSTANCE_LAUNCHING"
   default_result         = "ABANDON"
-  heartbeat_timeout      = 600
+  heartbeat_timeout      = local.lifecycle_hook_timeout
 }

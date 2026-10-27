@@ -111,7 +111,7 @@ By default `runonce.sh` attaches the ENI itself through the EC2 API, which needs
 1. An EventBridge rule on that lifecycle event starts an SSM Automation runbook (`<name>-attach-eni`), which
    waits for the instance to run and the ENI to be free, disables the source/dest check, attaches the ENI as
    `eth1`, and completes the hook with `CONTINUE`. On any failure it completes it with `ABANDON` (as does a
-   10-minute timeout), so the ASG launches another instance.
+   15-minute timeout), so the ASG launches another instance.
 1. Without a public IP, the instance's own traffic (SSM, package updates) also leaves through `eth1` and its
    Elastic IP: `egress-route.sh` keeps the main default route on `eth1`. Amazon Linux's boot-time security
    update (`repo_upgrade`) is turned off, as it would stall before that route exists.
