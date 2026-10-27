@@ -123,7 +123,8 @@ resource "aws_ssm_document" "attach_eni" {
 resource "aws_iam_role" "attach_eni_automation" {
   count = local.lifecycle_hook_count
 
-  name_prefix = "${var.name}-attach-eni-"
+  # IAM role name_prefix is at most 38 characters
+  name_prefix = "${substr(var.name, 0, 26)}-eni-ssm-"
   tags        = local.common_tags
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -211,7 +212,8 @@ resource "aws_cloudwatch_event_target" "attach_eni" {
 resource "aws_iam_role" "attach_eni_events" {
   count = local.lifecycle_hook_count
 
-  name_prefix = "${var.name}-attach-eni-ev-"
+  # IAM role name_prefix is at most 38 characters
+  name_prefix = "${substr(var.name, 0, 26)}-eni-evt-"
   tags        = local.common_tags
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
