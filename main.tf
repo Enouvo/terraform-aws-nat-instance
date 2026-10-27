@@ -74,7 +74,7 @@ resource "aws_launch_template" "this" {
   }
 
   network_interfaces {
-    associate_public_ip_address = true
+    associate_public_ip_address = var.associate_public_ip_address
     security_groups             = [aws_security_group.this.id]
     delete_on_termination       = true
   }

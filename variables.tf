@@ -84,6 +84,12 @@ variable "user_data_runcmd" {
   default     = []
 }
 
+variable "associate_public_ip_address" {
+  description = "Whether to associate a public ip address"
+  type        = bool
+  default     = true
+}
+
 locals {
   // Merge the default tags and user-specified tags.
   // User-specified tags take precedence over the default.
