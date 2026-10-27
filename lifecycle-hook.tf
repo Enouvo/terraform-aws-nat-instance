@@ -244,12 +244,13 @@ resource "aws_iam_role_policy" "attach_eni_events" {
     Version = "2012-10-17"
     Statement = [
       {
-        # Authorized against the document ARN, not only the automation-definition ARN EventBridge targets
+        # Authorized against the document, the automation-definition EventBridge targets, and the execution it creates
         Effect = "Allow"
         Action = "ssm:StartAutomationExecution"
         Resource = [
           local.attach_eni_document_arn,
           "${local.attach_eni_automation_definition_arn}:*",
+          "arn:${data.aws_partition.current.partition}:ssm:*:${data.aws_caller_identity.current.account_id}:automation-execution/*",
         ]
       },
       {
