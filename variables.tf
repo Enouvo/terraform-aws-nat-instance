@@ -54,8 +54,14 @@ variable "egress_via_eip" {
   default     = true
 }
 
+variable "single_eip" {
+  description = "Only one Elastic IP is associated with the ENI: egress masquerades on its primary private IP and the egress_public_ip lookup is skipped. Set false to pick among several Elastic IPs with egress_public_ip."
+  type        = bool
+  default     = true
+}
+
 variable "egress_public_ip" {
-  description = "With egress_via_eip and several Elastic IPs on the ENI, the one to send traffic from (e.g. the address an external service allowlists). It must be associated with one of the ENI's private IPs. Empty: the Elastic IP of the ENI's primary private IP."
+  description = "Only with single_eip = false: of several Elastic IPs on the ENI, the one to send traffic from (e.g. the address an external service allowlists). It must be associated with one of the ENI's private IPs. Empty: the Elastic IP of the ENI's primary private IP."
   type        = string
   default     = ""
 }
@@ -85,9 +91,15 @@ variable "user_data_runcmd" {
 }
 
 variable "associate_public_ip_address" {
-  description = "Whether to associate a public ip address"
+  description = "Whether to associate a public ip address with the instance (eth0). false turns on attach_eni_from_lifecycle_hook: without it the instance could not reach the EC2 API to attach the ENI."
   type        = bool
   default     = true
+}
+
+variable "attach_eni_from_lifecycle_hook" {
+  description = "Attach the ENI from outside the instance (ASG launch lifecycle hook -> EventBridge -> SSM Automation) instead of from runonce.sh. Always on with associate_public_ip_address = false."
+  type        = bool
+  default     = false
 }
 
 locals {

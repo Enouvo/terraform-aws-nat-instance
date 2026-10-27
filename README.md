@@ -80,20 +80,45 @@ The instance will execute [`runonce.sh`](runonce.sh) and [`snat.sh`](snat.sh) to
 
 1. Attach the ENI to `eth1`.
 1. Set the kernel parameters for IP forwarding and masquerade.
-1. If `eth1` has a public IP (your Elastic IP) and `egress_via_eip` is on (the default), route the
-   forwarded traffic, which enters on `eth1`, out of `eth1` through a policy rule (`iif eth1`, table
-   200) and masquerade there, so it leaves from the Elastic IP. The network scripts rewrite `eth1`'s
-   routing after boot too (ec2-net-utils refresh, DHCP renewal), so [`egress-route.sh`](egress-route.sh)
-   re-asserts the rule and route every 15 seconds (`nat-egress-route.timer`), logging each repair. Otherwise it masquerades through `eth0`,
-   whose auto-assigned public IP changes whenever the instance is replaced. The instance's own traffic
-   keeps using `eth0` either way.
+1. Masquerade on `eth0`, and with `egress_via_eip` (the default) on `eth1` too, then route forwarded traffic,
+   which enters on `eth1`:
+   - while `eth1` has a public IP (your Elastic IP): out of `eth1` through a policy rule (`iif eth1`,
+     table 200), so it leaves from the Elastic IP
+   - otherwise, or without `egress_via_eip`: out of `eth0`, from its auto-assigned public IP, which changes
+     whenever the instance is replaced
 
-Allowlisting the Elastic IP on an external service therefore requires `egress_via_eip`. The ENI's
-public IPs and the chosen one are logged by `snat.sh` in the instance's cloud-init output.
+   With `egress_via_eip`, [`egress-route.sh`](egress-route.sh) makes that choice at boot and every 15 seconds
+   after (`nat-egress-route.timer`): an Elastic IP associated after boot is picked up, a removed one falls
+   back to `eth0`, and the rule and route are restored when the network scripts drop them (ec2-net-utils
+   refresh, DHCP renewal). The instance's own traffic keeps using `eth0` while it has a public IP.
 
-With several Elastic IPs on the ENI (one per private IP), traffic leaves from the one on the ENI's
-primary private IP. Set `egress_public_ip` to pick another: traffic is then SNATed to the private IP
-that Elastic IP is associated with. An address not associated with the ENI is logged and ignored.
+Allowlisting the Elastic IP on an external service therefore requires `egress_via_eip`. Each change of egress
+interface and each repair is logged by `egress-route.sh` (`journalctl -u nat-egress-route`).
+
+Traffic leaves from the Elastic IP on the ENI's primary private IP. With `single_eip` (the default) that
+is the only one and nothing else is looked up. With several Elastic IPs on the ENI (one per private IP),
+set `single_eip = false` and `egress_public_ip` to pick another: traffic is then SNATed to the private
+IP that Elastic IP is associated with. An address not associated with the ENI is logged and ignored.
+
+### No public IP on the instance
+
+By default `runonce.sh` attaches the ENI itself through the EC2 API, which needs `eth0`'s public IP: until
+`eth1` is attached, that is the instance's only way out. With `associate_public_ip_address = false` (or
+`attach_eni_from_lifecycle_hook = true`) the ENI is attached from outside instead
+([`lifecycle-hook.tf`](lifecycle-hook.tf)):
+
+1. An ASG launch lifecycle hook (`attach-eni`) holds each new instance in `Pending:Wait`.
+1. An EventBridge rule on that lifecycle event starts an SSM Automation runbook (`<name>-attach-eni`), which
+   waits for the instance to run and the ENI to be free, disables the source/dest check, attaches the ENI as
+   `eth1`, and completes the hook with `CONTINUE`. On any failure it completes it with `ABANDON` (as does a
+   10-minute timeout), so the ASG launches another instance.
+1. Without a public IP, the instance's own traffic (SSM, package updates) also leaves through `eth1` and its
+   Elastic IP: `egress-route.sh` keeps the main default route on `eth1`. Amazon Linux's boot-time security
+   update (`repo_upgrade`) is turned off, as it would stall before that route exists.
+
+This needs `egress_via_eip` (the Elastic IP on the ENI is the only way out) and adds no running cost: no
+Lambda, only the hook, rule, runbook and two IAM roles. Runbook executions are under Systems Manager >
+Automation.
 
 
 ## Configuration
@@ -178,7 +203,10 @@ No requirements.
 
 | Name | Description | Type | Default | Required |
 |------|-------------|------|---------|:--------:|
-| egress\_public\_ip | With egress\_via\_eip and several Elastic IPs on the ENI, the one to send traffic from. It must be associated with one of the ENI's private IPs. Empty: the Elastic IP of the ENI's primary private IP | `string` | `""` | no |
+| single\_eip | Only one Elastic IP is associated with the ENI: egress masquerades on its primary private IP and the egress\_public\_ip lookup is skipped. Set false to pick among several Elastic IPs with egress\_public\_ip | `bool` | `true` | no |
+| egress\_public\_ip | Only with single\_eip = false: of several Elastic IPs on the ENI, the one to send traffic from. It must be associated with one of the ENI's private IPs. Empty: the Elastic IP of the ENI's primary private IP | `string` | `""` | no |
+| associate\_public\_ip\_address | Whether to associate a public ip address with the instance (eth0). false turns on attach\_eni\_from\_lifecycle\_hook: without it the instance could not reach the EC2 API to attach the ENI | `bool` | `true` | no |
+| attach\_eni\_from\_lifecycle\_hook | Attach the ENI from outside the instance (ASG launch lifecycle hook -> EventBridge -> SSM Automation) instead of from runonce.sh. Always on with associate\_public\_ip\_address = false | `bool` | `false` | no |
 | egress\_via\_eip | Send NAT traffic out through the ENI (eth1) when it has a public IP, i.e. an Elastic IP is associated with it, so it leaves from that stable address instead of the instance's auto-assigned public IP. Without a public IP on the ENI, traffic keeps leaving through eth0 | `bool` | `true` | no |
 | enabled | Enable or not costly resources | `bool` | `true` | no |
 | image\_id | AMI of the NAT instance. Default to the latest Amazon Linux 2 | `string` | `""` | no |

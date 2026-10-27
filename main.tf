@@ -86,45 +86,55 @@ resource "aws_launch_template" "this" {
 
   user_data = base64encode(join("\n", [
     "#cloud-config",
-    yamlencode({
-      # https://cloudinit.readthedocs.io/en/latest/topics/modules.html
-      write_files : concat([
-        {
-          path : "/opt/nat/runonce.sh",
-          content : templatefile("${path.module}/runonce.sh", { eni_id = aws_network_interface.this.id }),
-          permissions : "0755",
-        },
-        {
-          path : "/opt/nat/snat.sh",
-          content : templatefile("${path.module}/snat.sh", {
-            egress_via_eip   = var.egress_via_eip
-            egress_public_ip = var.egress_public_ip
-          }),
-          permissions : "0755",
-        },
-        {
-          path : "/etc/systemd/system/snat.service",
-          content : file("${path.module}/snat.service"),
-        },
-        # Keep forwarded traffic routed out of eth1 when egress goes through its Elastic IP (snat.sh)
-        {
-          path : "/opt/nat/egress-route.sh",
-          content : file("${path.module}/egress-route.sh"),
-          permissions : "0755",
-        },
-        {
-          path : "/etc/systemd/system/nat-egress-route.service",
-          content : file("${path.module}/nat-egress-route.service"),
-        },
-        {
-          path : "/etc/systemd/system/nat-egress-route.timer",
-          content : file("${path.module}/nat-egress-route.timer"),
-        },
-      ], var.user_data_write_files),
-      runcmd : concat([
-        ["/opt/nat/runonce.sh"],
-      ], var.user_data_runcmd),
-    })
+    yamlencode(merge(
+      # Without a public IP the instance has no way out until snat.sh routes its own traffic through eth1, which
+      # runs after Amazon Linux's boot-time security update would have stalled on the unreachable repositories
+      var.associate_public_ip_address ? {} : { repo_upgrade : "none" },
+      {
+        # https://cloudinit.readthedocs.io/en/latest/topics/modules.html
+        write_files : concat([
+          {
+            path : "/opt/nat/runonce.sh",
+            content : templatefile("${path.module}/runonce.sh", {
+              eni_id                = aws_network_interface.this.id
+              attach_eni_externally = local.attach_eni_externally
+            }),
+            permissions : "0755",
+          },
+          {
+            path : "/opt/nat/snat.sh",
+            content : templatefile("${path.module}/snat.sh", {
+              egress_via_eip   = var.egress_via_eip
+              single_eip       = var.single_eip
+              egress_public_ip = var.egress_public_ip
+              # Without a public IP on eth0, the instance's own traffic (SSM, package updates) needs eth1 too
+              own_traffic_via_eth1 = !var.associate_public_ip_address
+            }),
+            permissions : "0755",
+          },
+          {
+            path : "/etc/systemd/system/snat.service",
+            content : file("${path.module}/snat.service"),
+          },
+          # Keep forwarded traffic routed out of eth1 when egress goes through its Elastic IP (snat.sh)
+          {
+            path : "/opt/nat/egress-route.sh",
+            content : file("${path.module}/egress-route.sh"),
+            permissions : "0755",
+          },
+          {
+            path : "/etc/systemd/system/nat-egress-route.service",
+            content : file("${path.module}/nat-egress-route.service"),
+          },
+          {
+            path : "/etc/systemd/system/nat-egress-route.timer",
+            content : file("${path.module}/nat-egress-route.timer"),
+          },
+        ], var.user_data_write_files),
+        runcmd : concat([
+          ["/opt/nat/runonce.sh"],
+        ], var.user_data_runcmd),
+    }))
   ]))
 
   description = "Launch template for NAT instance ${var.name}"
@@ -157,6 +167,17 @@ resource "aws_autoscaling_group" "this" {
     }
   }
 
+  # Present from the first launch on (lifecycle-hook.tf)
+  dynamic "initial_lifecycle_hook" {
+    for_each = local.attach_eni_externally ? [1] : []
+    content {
+      name                 = local.lifecycle_hook_name
+      lifecycle_transition = "autoscaling:EC2_INSTANCE_LAUNCHING"
+      default_result       = "ABANDON"
+      heartbeat_timeout    = 600
+    }
+  }
+
   dynamic "tag" {
     for_each = local.common_tags
     content {
@@ -168,7 +189,16 @@ resource "aws_autoscaling_group" "this" {
 
   lifecycle {
     create_before_destroy = true
+
+    precondition {
+      condition     = !var.associate_public_ip_address ? var.egress_via_eip : true
+      error_message = "associate_public_ip_address = false needs egress_via_eip: the Elastic IP on the ENI is then the instance's only way out."
+    }
   }
+
+  # The rule and its target must exist before the first launch, or its lifecycle event is missed and the hook
+  # times out (ABANDON) before a retry launch is caught
+  depends_on = [aws_cloudwatch_event_target.attach_eni, aws_iam_role_policy.attach_eni_events, aws_iam_role_policy.attach_eni_automation]
 }
 
 resource "aws_iam_instance_profile" "this" {

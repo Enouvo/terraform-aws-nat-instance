@@ -17,88 +17,73 @@ sysctl -q -w net.ipv4.conf.default.rp_filter=0
 sysctl -q -w net.ipv4.ip_forward=1
 sysctl -q -w net.ipv4.conf.eth1.send_redirects=0
 
-# Egress interface. eth0 carries the instance's auto-assigned public IP, which changes every time the
-# instance is replaced (spot interruption, ASG refresh). When the persistent ENI eth1 has a public IP,
-# i.e. an Elastic IP is associated with it, NAT traffic is routed and masqueraded through eth1 instead,
-# so it leaves from that stable address. eth0 keeps its public IP to boot, attach eth1 and carry the
-# instance's own traffic.
+# Egress. Forwarded traffic enters on eth1 (the private route tables target this ENI) and leaves through:
+#   - eth1, while it has a public IP, i.e. an Elastic IP is associated with the ENI: that stable address
+#   - otherwise eth0, from the instance's auto-assigned public IP, which changes whenever the instance is replaced
+# Which of the two is not decided here, once: the Elastic IP can be associated after boot (a new VPC associates it
+# in the same apply that launches the instance) or removed later, and the network scripts rewrite eth1's routing
+# after boot as well. egress-route.sh decides and re-checks every few seconds (nat-egress-route.timer); this script
+# masquerades on both interfaces so either path works, and without egress_via_eip only eth0 is ever used.
 #
-# Forwarded traffic enters on eth1 (the private route tables target this ENI), so a policy rule sends
-# whatever arrives there through a table whose default route is eth1. Replies to NATed connections also
-# arrive on eth1 and follow the same rule back to the private subnets. The main table is left alone.
-#
-# That routing is not set once here: the network scripts rewrite eth1's routing during boot and
-# afterwards (ec2-net-utils' refresh / DHCP renewal), dropping what was added. egress-route.sh sets it
-# and nat-egress-route.timer re-runs it every few seconds; this script only decides that egress goes
-# through eth1, by creating /run/nat/egress-via-eth1.
-#
-# With several Elastic IPs on eth1 (one per private IP), MASQUERADE uses eth1's primary private IP, so
-# traffic leaves from the Elastic IP of that address. egress_public_ip picks another one: traffic is
-# SNATed to the private IP that Elastic IP is associated with.
-egress_dev=eth0
-snat_to_private_ip=""
+# MASQUERADE uses eth1's primary private IP, so traffic leaves from that address's Elastic IP: the only one with
+# single_eip (the default). With single_eip = false and several Elastic IPs on eth1 (one per private IP),
+# egress_public_ip picks another one: traffic is SNATed to the private IP that Elastic IP is associated with.
 if [ "${egress_via_eip}" = "true" ]; then
-  imds="http://169.254.169.254/latest"
-  imds_token=$(curl -s -X PUT "$imds/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
-  eth1_mac=$(cat /sys/class/net/eth1/address)
-  eth1_imds="$imds/meta-data/network/interfaces/macs/$eth1_mac"
-  # The metadata of a just-attached ENI can lag a few seconds
-  for attempt in 1 2 3 4 5 6 7 8 9 10; do
-    eth1_public_ips=$(curl -sf -H "X-aws-ec2-metadata-token: $imds_token" "$eth1_imds/public-ipv4s" || true)
-    [ -n "$eth1_public_ips" ] && break
-    sleep 2
+  # Routing set before eth1 is configured would be dropped by the network scripts
+  for attempt in $(seq 1 60); do
+    ip -4 addr show dev eth1 | grep -q "inet " && break
+    sleep 1
   done
 
-  if [ -n "$eth1_public_ips" ]; then
-    for attempt in $(seq 1 60); do
-      ip -4 addr show dev eth1 | grep -q "inet " && break
-      sleep 1
-    done
-    mkdir -p /run/nat
-    touch /run/nat/egress-via-eth1
-    /opt/nat/egress-route.sh
-    # Unit files were just written by cloud-init
-    systemctl daemon-reload
-    systemctl enable --now nat-egress-route.timer
-    echo "Forwarded traffic routed through eth1 (kept by nat-egress-route.timer)"
-    egress_dev=eth1
-    echo "eth1 public IPs: $(echo $eth1_public_ips)"
-
-    egress_public_ip="${egress_public_ip}"
-    if [ -n "$egress_public_ip" ]; then
+  snat_to_private_ip=""
+  egress_public_ip="${egress_public_ip}"
+  if [ "${single_eip}" != "true" ] && [ -n "$egress_public_ip" ]; then
+    imds="http://169.254.169.254/latest"
+    imds_token=$(curl -s -X PUT "$imds/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+    eth1_imds="$imds/meta-data/network/interfaces/macs/$(cat /sys/class/net/eth1/address)"
+    # The metadata of a just-attached ENI can lag a few seconds
+    for attempt in 1 2 3 4 5 6 7 8 9 10; do
       snat_to_private_ip=$(curl -sf -H "X-aws-ec2-metadata-token: $imds_token" \
         "$eth1_imds/ipv4-associations/$egress_public_ip" || true)
-      if [ -n "$snat_to_private_ip" ]; then
-        # ec2-net-utils configures secondary private IPs on eth1 asynchronously; add it if still missing
-        for attempt in 1 2 3 4 5 6 7 8 9 10; do
-          ip -4 addr show dev eth1 | grep -qw "$snat_to_private_ip" && break
-          sleep 1
-        done
-        if ! ip -4 addr show dev eth1 | grep -qw "$snat_to_private_ip"; then
-          prefix_length=$(curl -sf -H "X-aws-ec2-metadata-token: $imds_token" "$eth1_imds/subnet-ipv4-cidr-block" | cut -d/ -f2)
-          ip addr add "$snat_to_private_ip/$prefix_length" dev eth1
-        fi
-        echo "SNAT through eth1 to $snat_to_private_ip, public IP $egress_public_ip"
-      else
-        echo "WARNING: egress_public_ip $egress_public_ip is not associated with eth1; using its primary IP"
+      [ -n "$snat_to_private_ip" ] && break
+      sleep 2
+    done
+    if [ -n "$snat_to_private_ip" ]; then
+      # ec2-net-utils configures secondary private IPs on eth1 asynchronously; add it if still missing
+      for attempt in 1 2 3 4 5 6 7 8 9 10; do
+        ip -4 addr show dev eth1 | grep -qw "$snat_to_private_ip" && break
+        sleep 1
+      done
+      if ! ip -4 addr show dev eth1 | grep -qw "$snat_to_private_ip"; then
+        prefix_length=$(curl -sf -H "X-aws-ec2-metadata-token: $imds_token" "$eth1_imds/subnet-ipv4-cidr-block" | cut -d/ -f2)
+        ip addr add "$snat_to_private_ip/$prefix_length" dev eth1
       fi
+      echo "SNAT through eth1 to $snat_to_private_ip, public IP $egress_public_ip"
+    else
+      echo "WARNING: egress_public_ip $egress_public_ip is not associated with eth1; using its primary IP"
     fi
-    [ -z "$snat_to_private_ip" ] && echo "SNAT through eth1 (primary private IP)"
-  else
-    echo "eth1 has no public IP; SNAT through eth0"
   fi
+
+  if [ -n "$snat_to_private_ip" ]; then
+    iptables -t nat -A POSTROUTING -o eth1 -j SNAT --to-source "$snat_to_private_ip"
+  else
+    iptables -t nat -A POSTROUTING -o eth1 -j MASQUERADE
+  fi
+
+  mkdir -p /run/nat
+  touch /run/nat/egress-via-eip
+  # No public IP on eth0 (associate_public_ip_address = false): the instance's own traffic needs eth1 too
+  if [ "${own_traffic_via_eth1}" = "true" ]; then
+    touch /run/nat/own-traffic-via-eth1
+  fi
+  /opt/nat/egress-route.sh
+  # Unit files were just written by cloud-init
+  systemctl daemon-reload
+  systemctl enable --now nat-egress-route.timer
 fi
 
-if [ -n "$snat_to_private_ip" ]; then
-  iptables -t nat -A POSTROUTING -o eth1 -j SNAT --to-source "$snat_to_private_ip"
-else
-  iptables -t nat -A POSTROUTING -o "$egress_dev" -j MASQUERADE
-fi
-# Anything forwarded out of eth0 all the same (e.g. the eth1 rule removed by hand) still gets
-# translated, to eth0's address, instead of leaving with a private source
-if [ "$egress_dev" != eth0 ]; then
-  iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
-fi
+# eth0: the way out without an Elastic IP on eth1
+iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
 
 # wait for network connection
 curl --retry 10 http://www.example.com
