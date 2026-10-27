@@ -14,6 +14,13 @@ locals {
   # Covers the runbook's waits (instance running, ENI released by the instance being replaced) and the attach
   lifecycle_hook_timeout = 900
   lifecycle_hook_count   = local.attach_eni_externally ? 1 : 0
+
+  # The runbook's two ARNs. The provider's `arn` of an Automation document is already the automation-definition form
+  # (what EventBridge targets), while ssm:StartAutomationExecution is authorized against the document form, so both are
+  # derived from it rather than assumed.
+  attach_eni_runbook_arn               = try(aws_ssm_document.attach_eni[0].arn, "")
+  attach_eni_document_arn              = replace(local.attach_eni_runbook_arn, ":automation-definition/", ":document/")
+  attach_eni_automation_definition_arn = replace(local.attach_eni_runbook_arn, ":document/", ":automation-definition/")
 }
 
 data "aws_caller_identity" "current" {}
@@ -189,7 +196,7 @@ resource "aws_cloudwatch_event_target" "attach_eni" {
   count = local.lifecycle_hook_count
 
   rule     = aws_cloudwatch_event_rule.attach_eni[0].name
-  arn      = "${replace(aws_ssm_document.attach_eni[0].arn, ":document/", ":automation-definition/")}:$DEFAULT"
+  arn      = "${local.attach_eni_automation_definition_arn}:$DEFAULT"
   role_arn = aws_iam_role.attach_eni_events[0].arn
 
   # Automation parameters are lists of strings
@@ -241,8 +248,8 @@ resource "aws_iam_role_policy" "attach_eni_events" {
         Effect = "Allow"
         Action = "ssm:StartAutomationExecution"
         Resource = [
-          aws_ssm_document.attach_eni[0].arn,
-          "${replace(aws_ssm_document.attach_eni[0].arn, ":document/", ":automation-definition/")}:*",
+          local.attach_eni_document_arn,
+          "${local.attach_eni_automation_definition_arn}:*",
         ]
       },
       {
