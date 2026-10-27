@@ -106,6 +106,20 @@ resource "aws_launch_template" "this" {
           path : "/etc/systemd/system/snat.service",
           content : file("${path.module}/snat.service"),
         },
+        # Keep forwarded traffic routed out of eth1 when egress goes through its Elastic IP (snat.sh)
+        {
+          path : "/opt/nat/egress-route.sh",
+          content : file("${path.module}/egress-route.sh"),
+          permissions : "0755",
+        },
+        {
+          path : "/etc/systemd/system/nat-egress-route.service",
+          content : file("${path.module}/nat-egress-route.service"),
+        },
+        {
+          path : "/etc/systemd/system/nat-egress-route.timer",
+          content : file("${path.module}/nat-egress-route.timer"),
+        },
       ], var.user_data_write_files),
       runcmd : concat([
         ["/opt/nat/runonce.sh"],

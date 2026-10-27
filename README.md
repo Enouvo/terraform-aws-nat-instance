@@ -81,9 +81,10 @@ The instance will execute [`runonce.sh`](runonce.sh) and [`snat.sh`](snat.sh) to
 1. Attach the ENI to `eth1`.
 1. Set the kernel parameters for IP forwarding and masquerade.
 1. If `eth1` has a public IP (your Elastic IP) and `egress_via_eip` is on (the default), route the
-   forwarded traffic, which enters on `eth1`, out of `eth1` through a policy rule (`iif eth1`, using
-   the `eth1` table ec2-net-utils maintains, 10001, else a table of its own, 200) and masquerade there,
-   so it leaves from the Elastic IP. Otherwise it masquerades through `eth0`,
+   forwarded traffic, which enters on `eth1`, out of `eth1` through a policy rule (`iif eth1`, table
+   200) and masquerade there, so it leaves from the Elastic IP. The network scripts rewrite `eth1`'s
+   routing after boot too (ec2-net-utils refresh, DHCP renewal), so [`egress-route.sh`](egress-route.sh)
+   re-asserts the rule and route every 15 seconds (`nat-egress-route.timer`), logging each repair. Otherwise it masquerades through `eth0`,
    whose auto-assigned public IP changes whenever the instance is replaced. The instance's own traffic
    keeps using `eth0` either way.
 

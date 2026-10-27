@@ -1,0 +1,6 @@
+[Unit]
+Description = Keep NAT egress routed through eth1
+
+[Service]
+Type = oneshot
+ExecStart = /opt/nat/egress-route.sh
